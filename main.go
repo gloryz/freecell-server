@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	_ "github.com/lib/pq"
 	_ "modernc.org/sqlite"
 )
 
@@ -23,37 +25,50 @@ type Record struct {
 	Rank       int    `json:"rank,omitempty"`
 }
 
-var db *sql.DB
+var (
+	db     *sql.DB
+	pgMode bool
+)
+
+// ph returns a SQL placeholder: $N for PostgreSQL, ? for SQLite.
+func ph(n int) string {
+	if pgMode {
+		return fmt.Sprintf("$%d", n)
+	}
+	return "?"
+}
 
 func main() {
-	dbPath := os.Getenv("DB_PATH")
-	if dbPath == "" {
-		dbPath = "./freecell.db"
-	}
+	dbURL := os.Getenv("DATABASE_URL")
 
 	var err error
-	db, err = sql.Open("sqlite", dbPath)
-	if err != nil {
-		log.Fatal("DB open:", err)
+	if dbURL != "" {
+		pgMode = true
+		db, err = sql.Open("postgres", dbURL)
+		if err != nil {
+			log.Fatal("DB open (postgres):", err)
+		}
+		log.Println("Using PostgreSQL")
+	} else {
+		dbPath := os.Getenv("DB_PATH")
+		if dbPath == "" {
+			dbPath = "./freecell.db"
+		}
+		db, err = sql.Open("sqlite", dbPath)
+		if err != nil {
+			log.Fatal("DB open (sqlite):", err)
+		}
+		db.SetMaxOpenConns(1)
+		log.Println("Using SQLite:", dbPath)
 	}
 	defer db.Close()
 
-	db.SetMaxOpenConns(1) // SQLite single-writer
+	if err = db.Ping(); err != nil {
+		log.Fatal("DB ping:", err)
+	}
 
-	_, err = db.Exec(`
-		CREATE TABLE IF NOT EXISTS records (
-			id          INTEGER PRIMARY KEY AUTOINCREMENT,
-			player_name TEXT    NOT NULL,
-			deal_number INTEGER NOT NULL,
-			time_secs   INTEGER NOT NULL,
-			moves       INTEGER NOT NULL,
-			created_at  TEXT    NOT NULL
-		);
-		CREATE INDEX IF NOT EXISTS idx_time ON records(time_secs);
-		CREATE INDEX IF NOT EXISTS idx_deal ON records(deal_number, time_secs);
-	`)
-	if err != nil {
-		log.Fatal("Create table:", err)
+	if err = migrate(); err != nil {
+		log.Fatal("Migrate:", err)
 	}
 
 	mux := http.NewServeMux()
@@ -69,6 +84,37 @@ func main() {
 
 	log.Printf("FreeCell server listening on :%s", port)
 	log.Fatal(http.ListenAndServe(":"+port, cors(mux)))
+}
+
+func migrate() error {
+	var createTable string
+	if pgMode {
+		createTable = `
+			CREATE TABLE IF NOT EXISTS records (
+				id          SERIAL PRIMARY KEY,
+				player_name TEXT    NOT NULL,
+				deal_number INTEGER NOT NULL,
+				time_secs   INTEGER NOT NULL,
+				moves       INTEGER NOT NULL,
+				created_at  TEXT    NOT NULL
+			)`
+	} else {
+		createTable = `
+			CREATE TABLE IF NOT EXISTS records (
+				id          INTEGER PRIMARY KEY AUTOINCREMENT,
+				player_name TEXT    NOT NULL,
+				deal_number INTEGER NOT NULL,
+				time_secs   INTEGER NOT NULL,
+				moves       INTEGER NOT NULL,
+				created_at  TEXT    NOT NULL
+			)`
+	}
+	if _, err := db.Exec(createTable); err != nil {
+		return err
+	}
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_time ON records(time_secs)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_deal ON records(deal_number, time_secs)`)
+	return nil
 }
 
 func cors(next http.Handler) http.Handler {
@@ -109,20 +155,20 @@ func getRecords(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid dealNumber", http.StatusBadRequest)
 			return
 		}
-		rows, err = db.Query(`
+		rows, err = db.Query(fmt.Sprintf(`
 			SELECT id, player_name, deal_number, time_secs, moves, created_at
 			FROM records
-			WHERE deal_number = ?
+			WHERE deal_number = %s
 			ORDER BY time_secs ASC, moves ASC
-			LIMIT ?
-		`, deal, limit)
+			LIMIT %s
+		`, ph(1), ph(2)), deal, limit)
 	} else {
-		rows, err = db.Query(`
+		rows, err = db.Query(fmt.Sprintf(`
 			SELECT id, player_name, deal_number, time_secs, moves, created_at
 			FROM records
 			ORDER BY time_secs ASC, moves ASC
-			LIMIT ?
-		`, limit)
+			LIMIT %s
+		`, ph(1)), limit)
 	}
 	if err != nil {
 		log.Println("query:", err)
@@ -178,16 +224,35 @@ func postRecord(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339)
-	res, err := db.Exec(`
-		INSERT INTO records (player_name, deal_number, time_secs, moves, created_at)
-		VALUES (?, ?, ?, ?, ?)
-	`, name, req.DealNumber, req.Time, req.Moves, now)
-	if err != nil {
-		log.Println("insert:", err)
-		http.Error(w, "db error", http.StatusInternalServerError)
-		return
+
+	var id int64
+	if pgMode {
+		err := db.QueryRow(fmt.Sprintf(`
+			INSERT INTO records (player_name, deal_number, time_secs, moves, created_at)
+			VALUES (%s, %s, %s, %s, %s)
+			RETURNING id
+		`, ph(1), ph(2), ph(3), ph(4), ph(5)),
+			name, req.DealNumber, req.Time, req.Moves, now,
+		).Scan(&id)
+		if err != nil {
+			log.Println("insert:", err)
+			http.Error(w, "db error", http.StatusInternalServerError)
+			return
+		}
+	} else {
+		res, err := db.Exec(fmt.Sprintf(`
+			INSERT INTO records (player_name, deal_number, time_secs, moves, created_at)
+			VALUES (%s, %s, %s, %s, %s)
+		`, ph(1), ph(2), ph(3), ph(4), ph(5)),
+			name, req.DealNumber, req.Time, req.Moves, now,
+		)
+		if err != nil {
+			log.Println("insert:", err)
+			http.Error(w, "db error", http.StatusInternalServerError)
+			return
+		}
+		id, _ = res.LastInsertId()
 	}
-	id, _ := res.LastInsertId()
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
