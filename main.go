@@ -143,13 +143,61 @@ func handleRecords(w http.ResponseWriter, r *http.Request) {
 
 func getRecords(w http.ResponseWriter, r *http.Request) {
 	dealStr := r.URL.Query().Get("dealNumber")
+	dateStr := r.URL.Query().Get("date") // YYYY-MM-DD; if set, show best-per-player for that day
 	limit := 100
+
+	// Validate date format
+	if dateStr != "" {
+		if _, err := time.Parse("2006-01-02", dateStr); err != nil {
+			http.Error(w, "invalid date format, use YYYY-MM-DD", http.StatusBadRequest)
+			return
+		}
+	}
 
 	var (
 		rows *sql.Rows
 		err  error
 	)
-	if dealStr != "" {
+
+	if dateStr != "" {
+		// Daily leaderboard: best record per player for the given date
+		// created_at is stored as ISO 8601 text (e.g. "2026-04-23T03:30:00Z")
+		// Use LIKE 'YYYY-MM-DD%' to match the date prefix — works in both SQLite and PostgreSQL (TEXT column)
+		datePrefix := dateStr + "%"
+		p := func(n int) string { return ph(n) }
+
+		var dealCond string
+		var args []any
+		if dealStr != "" {
+			deal, e := strconv.Atoi(dealStr)
+			if e != nil || deal < 1 || deal > 32000 {
+				http.Error(w, "invalid dealNumber", http.StatusBadRequest)
+				return
+			}
+			dealCond = fmt.Sprintf("AND deal_number = %s", p(2))
+			args = []any{datePrefix, deal, limit}
+		} else {
+			dealCond = ""
+			args = []any{datePrefix, limit}
+		}
+
+		limitPh := p(len(args))
+		rows, err = db.Query(fmt.Sprintf(`
+			SELECT id, player_name, deal_number, time_secs, moves, created_at
+			FROM (
+				SELECT *,
+				       ROW_NUMBER() OVER (
+				           PARTITION BY player_name
+				           ORDER BY time_secs ASC, moves ASC, id ASC
+				       ) AS rn
+				FROM records
+				WHERE created_at LIKE %s %s
+			) sub
+			WHERE rn = 1
+			ORDER BY time_secs ASC, moves ASC
+			LIMIT %s
+		`, p(1), dealCond, limitPh), args...)
+	} else if dealStr != "" {
 		deal, e := strconv.Atoi(dealStr)
 		if e != nil || deal < 1 || deal > 32000 {
 			http.Error(w, "invalid dealNumber", http.StatusBadRequest)
