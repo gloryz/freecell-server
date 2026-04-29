@@ -153,10 +153,25 @@ func getRecords(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	toStr := r.URL.Query().Get("to") // UTC ISO timestamp: 이 시각 이전
+
 	if fromStr != "" {
-		if _, err := time.Parse("2006-01-02", fromStr); err != nil {
-			http.Error(w, "invalid from format, use YYYY-MM-DD", http.StatusBadRequest)
-			return
+		// YYYY-MM-DD 또는 full ISO timestamp 허용
+		if !strings.Contains(fromStr, "T") {
+			if _, err := time.Parse("2006-01-02", fromStr); err != nil {
+				http.Error(w, "invalid from format", http.StatusBadRequest)
+				return
+			}
+			fromStr = fromStr + "T00:00:00Z"
+		}
+	}
+	if toStr != "" {
+		if !strings.Contains(toStr, "T") {
+			if _, err := time.Parse("2006-01-02", toStr); err != nil {
+				http.Error(w, "invalid to format", http.StatusBadRequest)
+				return
+			}
+			toStr = toStr + "T23:59:59Z"
 		}
 	}
 
@@ -204,7 +219,15 @@ func getRecords(w http.ResponseWriter, r *http.Request) {
 			LIMIT %s
 		`, p(1), dealCond, limitPh), args...)
 	} else if fromStr != "" {
-		fromTS := fromStr + "T00:00:00Z"
+		var toCond string
+		var args []any
+		if toStr != "" {
+			toCond = fmt.Sprintf("AND created_at <= %s", ph(2))
+			args = []any{fromStr, toStr, limit}
+		} else {
+			args = []any{fromStr, limit}
+		}
+		limitPh := ph(len(args))
 		rows, err = db.Query(fmt.Sprintf(`
 			SELECT id, player_name, deal_number, time_secs, moves, created_at
 			FROM (
@@ -214,12 +237,12 @@ func getRecords(w http.ResponseWriter, r *http.Request) {
 				           ORDER BY time_secs ASC, moves ASC, id ASC
 				       ) AS rn
 				FROM records
-				WHERE created_at >= %s
+				WHERE created_at >= %s %s
 			) sub
 			WHERE rn = 1
 			ORDER BY time_secs ASC, moves ASC
 			LIMIT %s
-		`, ph(1), ph(2)), fromTS, limit)
+		`, ph(1), toCond, limitPh), args...)
 	} else if dealStr != "" {
 		deal, e := strconv.Atoi(dealStr)
 		if e != nil || deal < 1 || deal > 32000 {
