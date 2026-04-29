@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/user/freecell-server/.claude/build-and-commit.sh",
+            "timeout": 60,
+            "statusMessage": "빌드 및 GitHub 커밋 중..."
+          }
+        ]
+      }
+    ]
+  }
+}
