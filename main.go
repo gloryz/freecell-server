@@ -205,15 +205,31 @@ func getRecords(w http.ResponseWriter, r *http.Request) {
 		}
 		rows, err = db.Query(fmt.Sprintf(`
 			SELECT id, player_name, deal_number, time_secs, moves, created_at
-			FROM records
-			WHERE deal_number = %s
+			FROM (
+				SELECT *,
+				       ROW_NUMBER() OVER (
+				           PARTITION BY player_name, substr(created_at, 1, 10)
+				           ORDER BY time_secs ASC, moves ASC, id ASC
+				       ) AS rn
+				FROM records
+				WHERE deal_number = %s
+			) sub
+			WHERE rn = 1
 			ORDER BY time_secs ASC, moves ASC
 			LIMIT %s
 		`, ph(1), ph(2)), deal, limit)
 	} else {
 		rows, err = db.Query(fmt.Sprintf(`
 			SELECT id, player_name, deal_number, time_secs, moves, created_at
-			FROM records
+			FROM (
+				SELECT *,
+				       ROW_NUMBER() OVER (
+				           PARTITION BY player_name, substr(created_at, 1, 10)
+				           ORDER BY time_secs ASC, moves ASC, id ASC
+				       ) AS rn
+				FROM records
+			) sub
+			WHERE rn = 1
 			ORDER BY time_secs ASC, moves ASC
 			LIMIT %s
 		`, ph(1)), limit)
@@ -272,6 +288,42 @@ func postRecord(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339)
+	today := now[:10] + "%" // YYYY-MM-DD%
+
+	// 오늘 이미 등록된 기록 확인
+	var existingID int64
+	var existingTime, existingMoves int
+	err := db.QueryRow(fmt.Sprintf(`
+		SELECT id, time_secs, moves FROM records
+		WHERE player_name = %s AND created_at LIKE %s
+		ORDER BY time_secs ASC, moves ASC
+		LIMIT 1
+	`, ph(1), ph(2)), name, today).Scan(&existingID, &existingTime, &existingMoves)
+
+	if err != nil && err != sql.ErrNoRows {
+		log.Println("query existing:", err)
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+
+	hasExisting := err != sql.ErrNoRows
+	if hasExisting {
+		// 기존 기록보다 좋지 않으면 저장하지 않음
+		if req.Time > existingTime || (req.Time == existingTime && req.Moves >= existingMoves) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]any{"id": existingID, "skipped": true})
+			return
+		}
+		// 더 좋은 기록 → 오늘 기록 전체 삭제 후 새로 등록
+		if _, err := db.Exec(fmt.Sprintf(`
+			DELETE FROM records WHERE player_name = %s AND created_at LIKE %s
+		`, ph(1), ph(2)), name, today); err != nil {
+			log.Println("delete existing:", err)
+			http.Error(w, "db error", http.StatusInternalServerError)
+			return
+		}
+	}
 
 	var id int64
 	if pgMode {
