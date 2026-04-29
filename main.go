@@ -143,13 +143,19 @@ func handleRecords(w http.ResponseWriter, r *http.Request) {
 
 func getRecords(w http.ResponseWriter, r *http.Request) {
 	dealStr := r.URL.Query().Get("dealNumber")
-	dateStr := r.URL.Query().Get("date") // YYYY-MM-DD; if set, show best-per-player for that day
+	dateStr := r.URL.Query().Get("date") // YYYY-MM-DD: 해당 날짜 플레이어별 최고기록
+	fromStr := r.URL.Query().Get("from") // YYYY-MM-DD: 이 날짜 이후 날짜별·플레이어별 최고기록
 	limit := 100
 
-	// Validate date format
 	if dateStr != "" {
 		if _, err := time.Parse("2006-01-02", dateStr); err != nil {
 			http.Error(w, "invalid date format, use YYYY-MM-DD", http.StatusBadRequest)
+			return
+		}
+	}
+	if fromStr != "" {
+		if _, err := time.Parse("2006-01-02", fromStr); err != nil {
+			http.Error(w, "invalid from format, use YYYY-MM-DD", http.StatusBadRequest)
 			return
 		}
 	}
@@ -197,6 +203,23 @@ func getRecords(w http.ResponseWriter, r *http.Request) {
 			ORDER BY time_secs ASC, moves ASC
 			LIMIT %s
 		`, p(1), dealCond, limitPh), args...)
+	} else if fromStr != "" {
+		fromTS := fromStr + "T00:00:00Z"
+		rows, err = db.Query(fmt.Sprintf(`
+			SELECT id, player_name, deal_number, time_secs, moves, created_at
+			FROM (
+				SELECT *,
+				       ROW_NUMBER() OVER (
+				           PARTITION BY player_name, substr(created_at, 1, 10)
+				           ORDER BY time_secs ASC, moves ASC, id ASC
+				       ) AS rn
+				FROM records
+				WHERE created_at >= %s
+			) sub
+			WHERE rn = 1
+			ORDER BY time_secs ASC, moves ASC
+			LIMIT %s
+		`, ph(1), ph(2)), fromTS, limit)
 	} else if dealStr != "" {
 		deal, e := strconv.Atoi(dealStr)
 		if e != nil || deal < 1 || deal > 32000 {

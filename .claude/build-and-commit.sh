@@ -23,12 +23,26 @@ cd /Users/user/freecell-server
 go build -o freecell-server . || exit 1
 tar -czf freecell-server.tar.gz freecell-server
 
-# 3. 클라이언트 빌드 & 압축
+# 3. 클라이언트 Electron 빌드 & 압축
 cd /Users/user/freecell
-npm run build || exit 1
-zip -r dist.zip dist/
+npm run electron:build || exit 1
+cd release
+zip -r "FreeCell-${NEW_VERSION}-universal.zip" mac-universal/
 
-# 4. 서버 커밋 & 푸시
+# 오래된 버전 파일 정리 (현재 버전 제외)
+find . -maxdepth 1 \( -name "FreeCell-*.dmg" -o -name "FreeCell-*.zip" -o -name "FreeCell-*.blockmap" \) \
+  ! -name "FreeCell-${NEW_VERSION}-*" -delete
+
+# 4. 클라이언트 커밋 & 푸시
+cd /Users/user/freecell
+git add -A
+if ! git diff --cached --quiet; then
+  FILENAME=$(basename "$FILE")
+  git commit -m "update: ${FILENAME} (v${NEW_VERSION})"
+  git push origin main
+fi
+
+# 5. 서버 커밋 & 푸시
 cd /Users/user/freecell-server
 git add -A
 if ! git diff --cached --quiet; then
