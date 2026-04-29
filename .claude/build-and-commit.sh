@@ -14,21 +14,25 @@ case "$FILE" in
     ;;
 esac
 
-# 1. 서버 빌드 & 압축
+# 1. 버전 자동 증가 (patch)
+cd /Users/user/freecell
+NEW_VERSION=$(npm version patch --no-git-tag-version | tr -d 'v')
+
+# 2. 서버 빌드 & 압축
 cd /Users/user/freecell-server
 go build -o freecell-server . || exit 1
 tar -czf freecell-server.tar.gz freecell-server
 
-# 2. 클라이언트 빌드 & 압축
+# 3. 클라이언트 빌드 & 압축
 cd /Users/user/freecell
 npm run build || exit 1
 zip -r dist.zip dist/
 
-# 3. 서버 커밋 & 푸시
+# 4. 서버 커밋 & 푸시
 cd /Users/user/freecell-server
 git add -A
 if ! git diff --cached --quiet; then
   FILENAME=$(basename "$FILE")
-  git commit -m "update: ${FILENAME}"
+  git commit -m "update: ${FILENAME} (v${NEW_VERSION})"
   git push origin main
 fi
