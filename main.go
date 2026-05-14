@@ -73,6 +73,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/records", handleRecords)
+	mux.HandleFunc("/api/wins", handleWins)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
@@ -114,7 +115,130 @@ func migrate() error {
 	}
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_time ON records(time_secs)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_deal ON records(deal_number, time_secs)`)
+
+	var createWins string
+	if pgMode {
+		createWins = `
+			CREATE TABLE IF NOT EXISTS wins (
+				id          SERIAL PRIMARY KEY,
+				player_name TEXT NOT NULL,
+				season_key  TEXT NOT NULL,
+				created_at  TEXT NOT NULL
+			)`
+	} else {
+		createWins = `
+			CREATE TABLE IF NOT EXISTS wins (
+				id          INTEGER PRIMARY KEY AUTOINCREMENT,
+				player_name TEXT NOT NULL,
+				season_key  TEXT NOT NULL,
+				created_at  TEXT NOT NULL
+			)`
+	}
+	if _, err := db.Exec(createWins); err != nil {
+		return err
+	}
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_wins_season ON wins(season_key, player_name)`)
 	return nil
+}
+
+func handleWins(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		getWins(w, r)
+	case http.MethodPost:
+		postWin(w, r)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func getWins(w http.ResponseWriter, r *http.Request) {
+	season := r.URL.Query().Get("season")
+	if season == "" {
+		http.Error(w, "season required", http.StatusBadRequest)
+		return
+	}
+
+	rows, err := db.Query(fmt.Sprintf(`
+		SELECT player_name, COUNT(*) as win_count
+		FROM wins
+		WHERE season_key = %s
+		GROUP BY player_name
+		ORDER BY win_count DESC, MIN(created_at) ASC
+		LIMIT %s
+	`, ph(1), ph(2)), season, 100)
+	if err != nil {
+		log.Println("getWins:", err)
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	type WinEntry struct {
+		PlayerName string `json:"playerName"`
+		Wins       int    `json:"wins"`
+	}
+	wins := make([]WinEntry, 0)
+	for rows.Next() {
+		var e WinEntry
+		if err := rows.Scan(&e.PlayerName, &e.Wins); err != nil {
+			continue
+		}
+		wins = append(wins, e)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"wins": wins})
+}
+
+func postWin(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		PlayerName string `json:"playerName"`
+		Season     string `json:"season"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+
+	name := strings.TrimSpace(req.PlayerName)
+	if name == "" || len(name) > 20 {
+		http.Error(w, "playerName must be 1–20 chars", http.StatusBadRequest)
+		return
+	}
+	if len(req.Season) < 6 || len(req.Season) > 10 {
+		http.Error(w, "invalid season", http.StatusBadRequest)
+		return
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	var id int64
+	if pgMode {
+		err := db.QueryRow(fmt.Sprintf(`
+			INSERT INTO wins (player_name, season_key, created_at)
+			VALUES (%s, %s, %s) RETURNING id
+		`, ph(1), ph(2), ph(3)), name, req.Season, now).Scan(&id)
+		if err != nil {
+			log.Println("postWin:", err)
+			http.Error(w, "db error", http.StatusInternalServerError)
+			return
+		}
+	} else {
+		res, err := db.Exec(fmt.Sprintf(`
+			INSERT INTO wins (player_name, season_key, created_at)
+			VALUES (%s, %s, %s)
+		`, ph(1), ph(2), ph(3)), name, req.Season, now)
+		if err != nil {
+			log.Println("postWin:", err)
+			http.Error(w, "db error", http.StatusInternalServerError)
+			return
+		}
+		id, _ = res.LastInsertId()
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]any{"id": id})
 }
 
 func cors(next http.Handler) http.Handler {
