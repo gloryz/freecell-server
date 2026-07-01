@@ -74,6 +74,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/records", handleRecords)
 	mux.HandleFunc("/api/wins", handleWins)
+	mux.HandleFunc("/api/admin/clear", handleAdminClear)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
@@ -527,4 +528,20 @@ func postRecord(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(map[string]any{"id": id})
+}
+
+func handleAdminClear(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	secret := os.Getenv("ADMIN_SECRET")
+	if secret == "" || r.Header.Get("X-Admin-Secret") != secret {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	db.Exec("DELETE FROM records")
+	db.Exec("DELETE FROM wins")
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "cleared"})
 }
